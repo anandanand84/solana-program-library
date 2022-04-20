@@ -8,7 +8,7 @@ use {
             confidential_transfer::{self, ConfidentialTransferAccount},
             default_account_state::{self, DefaultAccountState},
             immutable_owner::ImmutableOwner,
-            memo_transfer::{self, memo_required},
+            memo_transfer::{self, check_previous_sibling_instruction_is_memo, memo_required},
             mint_close_authority::MintCloseAuthority,
             reallocate,
             transfer_fee::{self, TransferFeeAmount, TransferFeeConfig},
@@ -24,7 +24,6 @@ use {
         clock::Clock,
         decode_error::DecodeError,
         entrypoint::ProgramResult,
-        instruction::get_processed_sibling_instruction,
         msg,
         program::{invoke, invoke_signed, set_return_data},
         program_error::{PrintProgramError, ProgramError},
@@ -379,16 +378,7 @@ impl Processor {
         }
 
         if memo_required(&destination_account) {
-            let is_memo_program = |program_id: &Pubkey| -> bool {
-                program_id == &spl_memo::id() || program_id == &spl_memo::v1::id()
-            };
-            let previous_instruction = get_processed_sibling_instruction(0);
-            match previous_instruction {
-                Some(instruction) if is_memo_program(&instruction.program_id) => {}
-                _ => {
-                    return Err(TokenError::NoMemo.into());
-                }
-            }
+            check_previous_sibling_instruction_is_memo()?;
         }
 
         source_account.base.amount = source_account
@@ -784,35 +774,40 @@ impl Processor {
             }
         }
 
-        match source_account.base.delegate {
-            COption::Some(ref delegate) if cmp_pubkeys(authority_info.key, delegate) => {
-                Self::validate_owner(
+        if !source_account
+            .base
+            .is_owned_by_system_program_or_incinerator()
+        {
+            match source_account.base.delegate {
+                COption::Some(ref delegate) if cmp_pubkeys(authority_info.key, delegate) => {
+                    Self::validate_owner(
+                        program_id,
+                        delegate,
+                        authority_info,
+                        authority_info_data_len,
+                        account_info_iter.as_slice(),
+                    )?;
+
+                    if source_account.base.delegated_amount < amount {
+                        return Err(TokenError::InsufficientFunds.into());
+                    }
+                    source_account.base.delegated_amount = source_account
+                        .base
+                        .delegated_amount
+                        .checked_sub(amount)
+                        .ok_or(TokenError::Overflow)?;
+                    if source_account.base.delegated_amount == 0 {
+                        source_account.base.delegate = COption::None;
+                    }
+                }
+                _ => Self::validate_owner(
                     program_id,
-                    delegate,
+                    &source_account.base.owner,
                     authority_info,
                     authority_info_data_len,
                     account_info_iter.as_slice(),
-                )?;
-
-                if source_account.base.delegated_amount < amount {
-                    return Err(TokenError::InsufficientFunds.into());
-                }
-                source_account.base.delegated_amount = source_account
-                    .base
-                    .delegated_amount
-                    .checked_sub(amount)
-                    .ok_or(TokenError::Overflow)?;
-                if source_account.base.delegated_amount == 0 {
-                    source_account.base.delegate = COption::None;
-                }
+                )?,
             }
-            _ => Self::validate_owner(
-                program_id,
-                &source_account.base.owner,
-                authority_info,
-                authority_info_data_len,
-                account_info_iter.as_slice(),
-            )?,
         }
 
         // Revisit this later to see if it's worth adding a check to reduce
@@ -861,13 +856,20 @@ impl Processor {
                 .close_authority
                 .unwrap_or(source_account.base.owner);
 
-            Self::validate_owner(
-                program_id,
-                &authority,
-                authority_info,
-                authority_info_data_len,
-                account_info_iter.as_slice(),
-            )?;
+            if !source_account
+                .base
+                .is_owned_by_system_program_or_incinerator()
+            {
+                Self::validate_owner(
+                    program_id,
+                    &authority,
+                    authority_info,
+                    authority_info_data_len,
+                    account_info_iter.as_slice(),
+                )?;
+            } else if !solana_program::incinerator::check_id(destination_account_info.key) {
+                return Err(ProgramError::InvalidAccountData);
+            }
 
             if let Ok(confidential_transfer_state) =
                 source_account.get_extension::<ConfidentialTransferAccount>()
@@ -1042,7 +1044,7 @@ impl Processor {
         let mint = StateWithExtensions::<Mint>::unpack(&mint_data)
             .map_err(|_| Into::<ProgramError>::into(TokenError::InvalidMint))?;
         // TODO: update this with interest-bearing token extension logic
-        let ui_amount = spl_token::amount_to_ui_amount_string_trimmed(amount, mint.base.decimals);
+        let ui_amount = crate::amount_to_ui_amount_string_trimmed(amount, mint.base.decimals);
 
         set_return_data(&ui_amount.into_bytes());
         Ok(())
@@ -1058,8 +1060,7 @@ impl Processor {
         let mint = StateWithExtensions::<Mint>::unpack(&mint_data)
             .map_err(|_| Into::<ProgramError>::into(TokenError::InvalidMint))?;
         // TODO: update this with interest-bearing token extension logic
-        let amount =
-            spl_token::try_ui_amount_into_amount(ui_amount.to_string(), mint.base.decimals)?;
+        let amount = crate::try_ui_amount_into_amount(ui_amount.to_string(), mint.base.decimals)?;
 
         set_return_data(&amount.to_le_bytes());
         Ok(())

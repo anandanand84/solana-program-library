@@ -14,6 +14,7 @@ source ./ci/solana-version.sh
 old_solana_ver=${solana_version#v}
 
 sed -i'' -e "s#solana_version=v.*#solana_version=v${solana_ver}#" ./ci/solana-version.sh
+sed -i'' -e "s#solana_version = \".*\"#solana_version = \"${solana_ver}\"#" ./Anchor.toml
 
 declare tomls=()
 while IFS='' read -r line; do tomls+=("$line"); done < <(find . -name Cargo.toml)
@@ -36,6 +37,7 @@ crates=(
   solana-runtime
   solana-sdk
   solana-stake-program
+  solana-test-validator
   solana-transaction-status
   solana-vote-program
   solana-version
