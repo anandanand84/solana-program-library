@@ -45,6 +45,32 @@ pub fn swap(
     })
 }
 
+/// The constant product swap calculation, factored out of its class for reuse.
+///
+/// This is guaranteed to work for all values such that:
+///  - 1 <= swap_source_amount * swap_destination_amount <= u128::MAX
+///  - 1 <= source_amount <= u64::MAX
+pub fn get_swap_amount(
+    destination_amount: u128,
+    swap_source_amount: u128,
+    swap_destination_amount: u128,
+) -> Option<SwapWithoutFeesResult> {
+    let invariant = swap_source_amount.checked_mul(swap_destination_amount)?;
+
+    let new_swap_destination_amount = swap_destination_amount.checked_sub(destination_amount)?;
+    let (new_swap_source_amount, new_swap_destination_amount) =
+        invariant.checked_ceil_div(new_swap_destination_amount)?;
+
+    let source_amount_swapped = new_swap_source_amount.checked_sub(swap_source_amount)?;
+    let destination_amount_swapped =
+        map_zero_to_none(swap_destination_amount.checked_sub(new_swap_destination_amount)?)?;
+
+    Some(SwapWithoutFeesResult {
+        source_amount_swapped,
+        destination_amount_swapped,
+    })
+}
+
 /// Get the amount of trading tokens for the given amount of pool tokens,
 /// provided the total trading tokens and supply of pool tokens.
 ///
@@ -174,12 +200,15 @@ impl CurveCalculator for ConstantProductCurve {
     /// Constant product swap ensures x * y = constant
     fn swap_without_fees(
         &self,
-        source_amount: u128,
+        amount: u128,
         swap_source_amount: u128,
         swap_destination_amount: u128,
-        _trade_direction: TradeDirection,
+        trade_direction: TradeDirection,
     ) -> Option<SwapWithoutFeesResult> {
-        swap(source_amount, swap_source_amount, swap_destination_amount)
+        match trade_direction {
+            TradeDirection::AtoB => swap(amount, swap_source_amount, swap_destination_amount),
+            TradeDirection::BtoA => get_swap_amount(amount, swap_source_amount, swap_destination_amount)
+        }
     }
 
     /// The constant product implementation is a simple ratio calculation for how many

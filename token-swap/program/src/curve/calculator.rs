@@ -31,8 +31,10 @@ pub fn map_zero_to_none(x: u128) -> Option<u128> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TradeDirection {
     /// Input token A, output token B
+    /// Solana is not using this, so we are using this to calculate exact value for a specific input
     AtoB,
     /// Input token B, output token A
+    /// Solana is not using this, so we are using this to calculate exact input for a specific output token
     BtoA,
 }
 

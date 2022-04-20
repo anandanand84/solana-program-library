@@ -77,11 +77,14 @@ impl SwapCurve {
         fees: &Fees,
     ) -> Option<SwapResult> {
         // debit the fee to calculate the amount swapped
-        let trade_fee = fees.trading_fee(source_amount)?;
-        let owner_fee = fees.owner_trading_fee(source_amount)?;
+        let mut trade_fee = fees.trading_fee(source_amount)?;
+        let mut owner_fee = fees.owner_trading_fee(source_amount)?;
 
-        let total_fees = trade_fee.checked_add(owner_fee)?;
-        let source_amount_less_fees = source_amount.checked_sub(total_fees)?;
+        let mut total_fees = trade_fee.checked_add(owner_fee)?;
+
+
+        
+        let source_amount_less_fees = if trade_direction == TradeDirection::AtoB { source_amount.checked_sub(total_fees)? } else { source_amount };
 
         let SwapWithoutFeesResult {
             source_amount_swapped,
@@ -93,7 +96,25 @@ impl SwapCurve {
             trade_direction,
         )?;
 
-        let source_amount_swapped = source_amount_swapped.checked_add(total_fees)?;
+        // fee calculation has to be done after the input amount is calculated for exact amount out.
+        let source_amount_swapped = if trade_direction == TradeDirection::AtoB {
+            source_amount_swapped.checked_add(total_fees)?
+        } else {
+            // Reverse fee calculation for exact amount in given output amount
+            let trade_fee_numerator = u128::try_from(fees.trade_fee_numerator).ok()?;
+            let trade_fee_denominator = u128::try_from(fees.trade_fee_denominator).ok()?;
+
+            let owner_trade_fee_numerator = u128::try_from(fees.owner_trade_fee_numerator).ok()?;
+            let owner_trade_fee_denominator = u128::try_from(fees.owner_trade_fee_denominator).ok()?;
+           
+            let amount_including_trade_fee = source_amount_swapped.checked_mul(trade_fee_denominator)?.checked_div(trade_fee_denominator.checked_sub(trade_fee_numerator)?).unwrap_or_default();
+            let amount_including_owner_trade_fee = source_amount_swapped.checked_mul(owner_trade_fee_denominator)?.checked_div(owner_trade_fee_denominator.checked_sub(owner_trade_fee_numerator)?).unwrap_or_default();
+            trade_fee = amount_including_trade_fee.checked_sub(source_amount_swapped).unwrap_or_default();
+            owner_fee = amount_including_owner_trade_fee.checked_sub(source_amount_swapped).unwrap_or_default();
+            total_fees = trade_fee.checked_add(owner_fee)?;
+            source_amount_swapped.checked_add(total_fees)?
+        };
+
         Some(SwapResult {
             new_swap_source_amount: swap_source_amount.checked_add(source_amount_swapped)?,
             new_swap_destination_amount: swap_destination_amount
